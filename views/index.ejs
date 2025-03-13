@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Test chiamata remota</title>
+</head>
+<body>
+    <h1>Test chiamata verso un servizio remoto</h1>
+    <form action="/test" method="post">
+        <div>
+            <label for="RemoteUrl">Remote URL:</label>
+            <input type="text" id="RemoteUrl" name="RemoteUrl" value="<%= remoteUrl %>" style="width:400px">
+        </div>
+        <div>
+            <label for="HttpMethod">HTTP Method:</label>
+            <select id="HttpMethod" name="HttpMethod">
+                <option value="GET" <%= httpMethod === 'GET' ? 'selected' : '' %>>GET</option>
+                <option value="POST" <%= httpMethod === 'POST' ? 'selected' : '' %>>POST</option>
+                <option value="PUT" <%= httpMethod === 'PUT' ? 'selected' : '' %>>PUT</option>
+                <option value="PATCH" <%= httpMethod === 'PATCH' ? 'selected' : '' %>>PATCH</option>
+                <option value="DELETE" <%= httpMethod === 'DELETE' ? 'selected' : '' %>>DELETE</option>
+            </select>
+        </div>
+        <div>
+            <label for="Headers">Headers (JSON):</label><br>
+            <textarea id="Headers" name="Headers" rows="4" cols="60"><%= headersJson %></textarea>
+            <br/>
+            <small>Esempio: { "Authorization": "Bearer xyz", "CustomHeader": "abc" }</small>
+        </div>
+        <hr/>
+
+        <h3>Payload</h3>
+        <div>
+            <input type="radio" id="payloadTypeJson" name="PayloadType" value="json" <%= payloadType === 'json' ? 'checked' : '' %> />
+            <label for="payloadTypeJson">JSON</label>
+            <input type="radio" id="payloadTypeXml" name="PayloadType" value="xml" <%= payloadType === 'xml' ? 'checked' : '' %> />
+            <label for="payloadTypeXml">XML</label>
+        </div>
+
+        <div>
+            <label for="PayloadText">Payload (JSON o XML a seconda del tipo selezionato):</label><br>
+            <textarea id="PayloadText" name="PayloadText" rows="5" cols="60"><%= payloadText %></textarea>
+            <br/>
+            <small>Esempio JSON: { "foo": "bar" }<br/>Esempio XML: &lt;root&gt;&lt;foo&gt;bar&lt;/foo&gt;&lt;/root&gt;</small>
+        </div>
+
+        <br/>
+        <button type="submit">Invia richiesta</button>
+    </form>
+
+    <% if (statusCode !== null) { %>
+    <hr>
+    <h2>Risultato</h2>
+    <p><strong>Status Code:</strong> <%= statusCode %></p>
+    <h4>Body di risposta</h4>
+    <pre><%= responseBody %></pre>
+    <% } %>
+</body>
+</html>
