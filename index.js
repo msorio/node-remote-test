@@ -31,6 +31,7 @@ app.post('/test', async (req, res) => {
   const headersJson = req.body.Headers || '';
   const payloadType = req.body.PayloadType || 'json';  // 'json' o 'xml'
   const payloadText = req.body.PayloadText || '';
+  
 
   let statusCode = null;
   let responseBody = '';
@@ -67,6 +68,13 @@ app.post('/test', async (req, res) => {
       });
     }
   }
+  
+  console.log("Remote URL:" + remoteUrl);
+  console.log("Http Method:" + httpMethod);
+  console.log("Headers Json:" + headersJson);
+  console.log("Payload Type:" + payloadType);
+  console.log("Payload Text:" + payloadText);
+
 
   // Prepara la configurazione per Axios
   const axiosConfig = {
@@ -114,7 +122,8 @@ app.post('/test', async (req, res) => {
     // Inviamo la richiesta
     const response = await axios(axiosConfig);
     statusCode = response.status;
-
+	console.log("Status Code:" || statusCode);
+	
     // Cerchiamo di capire se la risposta è JSON oppure no
     // Se il server risponde con application/json, la libreria axios restituisce un oggetto.
     // Se è testuale o XML, di solito axios la tratta come stringa.
@@ -130,12 +139,15 @@ app.post('/test', async (req, res) => {
       // Se la risposta di errore è un oggetto (JSON), cerchiamo di mostrarlo in modo leggibile
       if (typeof error.response.data === 'object') {
         responseBody = JSON.stringify(error.response.data, null, 2);
+		console.log("Error: " + JSON.stringify(error.response.data, null, 2));
       } else {
         responseBody = error.response.data || error.message;
+		console.log("Error: " + error.response.data || error.message);
       }
     } else {
       // Errore di rete, di configurazione, ecc.
       responseBody = error.message;
+	  console.log("Error: " + error.message);
     }
   }
 
