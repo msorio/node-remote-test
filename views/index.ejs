@@ -55,5 +55,12 @@
     <h4>Body di risposta</h4>
     <pre><%= responseBody %></pre>
     <% } %>
+    <% if (statusCode == null && responseBody !== null) { %>
+    <hr>
+    <h2>Risultato</h2>
+    <h4>Body di risposta</h4>
+    <pre><%= responseBody %></pre>
+    <% } %>
+
 </body>
 </html>
