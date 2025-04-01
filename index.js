@@ -2,6 +2,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
 const oracledb = require('oracledb');
+const net = require('net');
 
 const app = express();
 
@@ -204,6 +205,74 @@ app.get('/test-oracle', async (req, res) => {
     }
   }
 });
+
+
+// GET - Home page con un form (HTML semplice)
+app.get('/port', (req, res) => {
+  res.send(`
+    <h1>Test di raggiungibilità IP/porta</h1>
+    <form action="/check-port" method="post">
+      <label for="host">Host/IP:</label>
+      <input type="text" name="host" id="host" placeholder="es. 8.8.8.8" required />
+      <br/>
+      <label for="port">Porta:</label>
+      <input type="number" name="port" id="port" placeholder="es. 53" required />
+      <br/><br/>
+      <button type="submit">Verifica</button>
+    </form>
+  `);
+});
+
+// POST - Effettua il check sulla porta
+app.post('/check-port', async (req, res) => {
+  const host = req.body.host || '';
+  const port = parseInt(req.body.port, 10);
+
+  if (!host || !port) {
+    return res.send('Host o porta non validi');
+  }
+
+  try {
+    const isOpen = await checkPort(host, port);
+    if (isOpen) {
+      res.send(`La porta ${port} su host ${host} è raggiungibile (TCP connect OK).`);
+    } else {
+      res.send(`La porta ${port} su host ${host} non è raggiungibile (timeout o errore).`);
+    }
+  } catch (err) {
+    res.send(`Errore durante la verifica: ${err.message}`);
+  }
+});
+
+// Funzione per testare la connessione TCP su host/porta
+function checkPort(host, port, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    const socket = new net.Socket();
+
+    // Se entro "timeoutMs" ms non riusciamo a connetterci, consideriamo la porta chiusa
+    socket.setTimeout(timeoutMs);
+
+    // Se ci colleghiamo con successo, la porta è aperta
+    socket.once('connect', () => {
+      socket.end();
+      resolve(true);
+    });
+
+    // In caso di errore o timeout, la connessione non è riuscita
+    socket.once('error', (err) => {
+      socket.destroy();
+      resolve(false); // o reject(err) se vuoi distinguere errori vari
+    });
+
+    socket.once('timeout', () => {
+      socket.destroy();
+      resolve(false);
+    });
+
+    // Tentiamo la connessione
+    socket.connect(port, host);
+  });
+}
 
 
 // Avvio del server
