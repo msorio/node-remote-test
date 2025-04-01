@@ -1,6 +1,7 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
+const oracledb = require('oracledb');
 
 const app = express();
 
@@ -162,6 +163,48 @@ app.post('/test', async (req, res) => {
     responseBody
   });
 });
+
+// Endpoint che testa la connessione
+app.get('/test-oracle', async (req, res) => {
+  // Esempio di connection string e credenziali
+  // Su App Service, potresti usare variabili d'ambiente
+  const connConfig = {
+    user: process.env.ORACLE_USER || 'GEMSVIL',
+    password: process.env.ORACLE_PASSWORD || 'GEMSVIL',
+    connectString: process.env.ORACLE_CONNECTSTRING 
+       || 'dlc101-vip.griffon.local:1540/P0NCSIDBTC.griffon.local'
+       // oppure TNS:  '(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=...)(PORT=1521))(CONNECT_DATA=(SID=...)))'
+  };
+
+  let connection;
+  try {
+    // Connessione
+    connection = await oracledb.getConnection(connConfig);
+
+    // Query di test
+    const result = await connection.execute("SELECT 'OK' as RESULT FROM DUAL");
+    const row = result.rows[0];
+    res.json({
+      success: true,
+      message: 'Connessione riuscita',
+      result: row
+    });
+  } catch (err) {
+    res.json({
+      success: false,
+      message: `Errore: ${err.message}`
+    });
+  } finally {
+    if (connection) {
+      try {
+        await connection.close();
+      } catch (closeErr) {
+        console.log('Errore in chiusura:', closeErr);
+      }
+    }
+  }
+});
+
 
 // Avvio del server
 const port = process.env.PORT || 3000;
