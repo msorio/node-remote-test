@@ -225,22 +225,43 @@ app.get('/port', (req, res) => {
 
 // POST - Effettua il check sulla porta
 app.post('/check-port', async (req, res) => {
-  const host = req.body.host || '';
+  const host = req.body.host?.trim();
   const port = parseInt(req.body.port, 10);
 
-  if (!host || !port) {
-    return res.send('Host o porta non validi');
+  // 🔍 Validazioni di input
+  if (!host) {
+    return res.status(400).send('Errore: host mancante o vuoto.');
+  }
+  if (isNaN(port)) {
+    return res.status(400).send('Errore: la porta deve essere un numero.');
+  }
+  if (port <= 0 || port > 65535) {
+    return res.status(400).send('Errore: la porta deve essere compresa tra 1 e 65535.');
   }
 
   try {
     const isOpen = await checkPort(host, port);
     if (isOpen) {
-      res.send(`La porta ${port} su host ${host} è raggiungibile (TCP connect OK).`);
+      res.send(`✅ La porta ${port} su host ${host} è raggiungibile (TCP connect OK).`);
     } else {
-      res.send(`La porta ${port} su host ${host} non è raggiungibile (timeout o errore).`);
+      res.status(502).send(`❌ La porta ${port} su host ${host} non è raggiungibile (timeout o rifiutata).`);
     }
   } catch (err) {
-    res.send(`Errore durante la verifica: ${err.message}`);
+    // 🔍 Messaggi di errore più parlanti in base al tipo
+    let reason = 'Errore sconosciuto';
+    if (err.code === 'ECONNREFUSED') {
+      reason = 'Connessione rifiutata (nessun servizio in ascolto).';
+    } else if (err.code === 'ENOTFOUND') {
+      reason = 'Host non trovato (problema DNS).';
+    } else if (err.code === 'ETIMEDOUT') {
+      reason = 'Timeout di connessione (host irraggiungibile o firewall).';
+    } else if (err.code) {
+      reason = `Codice errore: ${err.code}`;
+    } else if (err.message) {
+      reason = err.message;
+    }
+
+    res.status(500).send(`❌ Errore durante la verifica: ${reason}`);
   }
 });
 
