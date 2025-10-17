@@ -3,8 +3,89 @@ const bodyParser = require('body-parser');
 const axios = require('axios');
 const oracledb = require('oracledb');
 const net = require('net');
-
 const app = express();
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
+
+// utility per eseguire comandi in modo sicuro (senza shell) con timeout
+async function tryExec(file, args = [], options = {}) {
+  try {
+    const { stdout, stderr } = await execFileAsync(file, args, { timeout: 8000, ...options });
+    return { ok: true, stdout: stdout?.toString() || '', stderr: stderr?.toString() || '' };
+  } catch (err) {
+    // includo eventuale stdout/stderr per diagnosi
+    return {
+      ok: false,
+      stdout: err.stdout?.toString?.() || '',
+      stderr: (err.stderr?.toString?.() || err.message || '').toString()
+    };
+  }
+}
+
+// fallback multipli per ottenere output “equivalente”
+async function getRoutingTable() {
+  // netstat -nrv  (Linux: -r -n, -v ignorato)
+  let out = await tryExec('netstat', ['-nrv']);
+  if (out.ok && out.stdout.trim()) return { cmd: 'netstat -nrv', ...out };
+  // ss non stampa la route, quindi proviamo ip route
+  out = await tryExec('ip', ['route']);
+  if (out.ok && out.stdout.trim()) return { cmd: 'ip route', ...out };
+  // come ultima spiaggia: route -n
+  out = await tryExec('route', ['-n']);
+  return { cmd: 'route -n', ...out };
+}
+
+async function getIfconfig() {
+  let out = await tryExec('ifconfig', ['-a']);
+  if (out.ok && out.stdout.trim()) return { cmd: 'ifconfig -a', ...out };
+  out = await tryExec('ip', ['addr', 'show']);
+  if (out.ok && out.stdout.trim()) return { cmd: 'ip addr show', ...out };
+  return { cmd: 'ifconfig -a', ok: false, stdout: '', stderr: 'Comando non disponibile' };
+}
+
+// ricava il gateway di default da “ip route” o “netstat -rn”
+async function getDefaultGateway() {
+  let gw = null;
+
+  let r = await tryExec('ip', ['route']);
+  const text = (r.stdout || '') + '\n' + (r.stderr || '');
+  let m = text.match(/default\s+via\s+([0-9a-fA-F\.:]+)/);
+  if (m) gw = m[1];
+
+  if (!gw) {
+    r = await tryExec('netstat', ['-rn']);
+    const t = (r.stdout || '') + '\n' + (r.stderr || '');
+    // “0.0.0.0  GW …” o “default  GW …”
+    m = t.match(/^(?:0\.0\.0\.0|default)\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/m);
+    if (m) gw = m[1];
+  }
+
+  return gw;
+}
+
+// ping con massimo 4 pacchetti (ICMP può fallire su App Service)
+async function pingHost(host) {
+  // -c 4: 4 echo; -w 8: timeout complessivo
+  return await tryExec('ping', ['-c', '4', '-w', '8', host]);
+}
+
+// traceroute (su alcune immagini non c’è); se manca, tentiamo “tracepath”
+async function traceDestination(dest) {
+  let out = await tryExec('traceroute', ['-n', '-w', '2', '-q', '1', dest]); // -n no DNS, più veloce
+  if (out.ok && (out.stdout.trim() || out.stderr.trim())) return { cmd: `traceroute -n ${dest}`, ...out };
+  out = await tryExec('tracepath', ['-n', dest]);
+  return { cmd: `tracepath -n ${dest}`, ...out };
+}
+
+// sanitizzazione basilare dell’host (IP o hostname semplice)
+function isSafeHost(input) {
+  if (!input || typeof input !== 'string') return false;
+  // vietiamo spazi e caratteri di shell
+  if (/[^\w\.\-:]/.test(input)) return false;
+  return true;
+}
+
 
 // Impostiamo EJS come "view engine"
 app.set('view engine', 'ejs');
@@ -228,21 +309,67 @@ app.post('/check-port', async (req, res) => {
   const host = req.body.host || '';
   const port = parseInt(req.body.port, 10);
 
-  if (!host || !port) {
+  if (!isSafeHost(host) || !port) {
     return res.send('Host o porta non validi');
   }
 
+  let tcpResultText = '';
   try {
     const isOpen = await checkPort(host, port);
-    if (isOpen) {
-      res.send(`La porta ${port} su host ${host} è raggiungibile (TCP connect OK).`);
-    } else {
-      res.send(`La porta ${port} su host ${host} non è raggiungibile (timeout o errore).`);
-    }
+    tcpResultText = isOpen
+      ? `La porta ${port} su host ${host} è raggiungibile (TCP connect OK).`
+      : `La porta ${port} su host ${host} non è raggiungibile (timeout o errore).`;
   } catch (err) {
-    res.send(`Errore durante la verifica: ${err.message}`);
+    tcpResultText = `Errore durante la verifica TCP: ${err.message}`;
   }
+
+  // --- DIAGNOSTICA DI RETE ---
+  const [routeTable, ifcfg] = await Promise.all([
+    getRoutingTable(),
+    getIfconfig()
+  ]);
+
+  // gateway di default
+  const gw = await getDefaultGateway();
+
+  // ping al gateway (se trovato)
+  let pingGw = { cmd: gw ? `ping -c 4 ${gw}` : 'ping', ok: false, stdout: '', stderr: 'Gateway non rilevato' };
+  if (gw) {
+    pingGw = await pingHost(gw);
+    pingGw.cmd = `ping -c 4 ${gw}`;
+  }
+
+  // traceroute alla destination (host param)
+  const trace = await traceDestination(host);
+
+  // Risposta HTML con blocchi <pre>
+  res.send(`
+    <h1>Esito verifica porta</h1>
+    <p>${tcpResultText}</p>
+
+    <h2>Routing Table (${routeTable.cmd})</h2>
+    <pre>${(routeTable.stdout || '').replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s])) || '(vuoto)'}</pre>
+    ${routeTable.stderr ? `<h3>stderr</h3><pre>${routeTable.stderr.replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</pre>` : ''}
+
+    <h2>Interfacce (${ifcfg.cmd})</h2>
+    <pre>${(ifcfg.stdout || '').replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s])) || '(vuoto)'}</pre>
+    ${ifcfg.stderr ? `<h3>stderr</h3><pre>${ifcfg.stderr.replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</pre>` : ''}
+
+    <h2>Ping gateway${gw ? ` (${gw})` : ''} (${pingGw.cmd})</h2>
+    <pre>${(pingGw.stdout || '').replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s])) || '(vuoto)'}</pre>
+    ${pingGw.stderr ? `<h3>stderr</h3><pre>${pingGw.stderr.replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</pre>` : ''}
+
+    <h2>Traceroute (${trace.cmd})</h2>
+    <pre>${(trace.stdout || '').replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s])) || '(vuoto)'}</pre>
+    ${trace.stderr ? `<h3>stderr</h3><pre>${trace.stderr.replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</pre>` : ''}
+
+    <p style="margin-top:16px;color:#666;font-size:0.9em">
+      Nota: su App Service/ASE alcuni comandi possono non essere disponibili o l’ICMP può essere bloccato; 
+      in tal caso è normale vedere errori pur con connettività applicativa funzionante.
+    </p>
+  `);
 });
+
 
 // Funzione per testare la connessione TCP su host/porta
 function checkPort(host, port, timeoutMs = 3000) {
