@@ -370,6 +370,53 @@ app.post('/check-port', async (req, res) => {
   `);
 });
 
+  // --- DIAGNOSTICA DI RETE ---
+  const [routeTable, ifcfg] = await Promise.all([
+    getRoutingTable(),
+    getIfconfig()
+  ]);
+
+  // gateway di default
+  const gw = await getDefaultGateway();
+
+  // ping al gateway (se trovato)
+  let pingGw = { cmd: gw ? `ping -c 4 ${gw}` : 'ping', ok: false, stdout: '', stderr: 'Gateway non rilevato' };
+  if (gw) {
+    pingGw = await pingHost(gw);
+    pingGw.cmd = `ping -c 4 ${gw}`;
+  }
+
+  // traceroute alla destination (host param)
+  const trace = await traceDestination(host);
+
+  // Risposta HTML con blocchi <pre>
+  res.send(`
+    <h1>Esito verifica porta</h1>
+    <p>${tcpResultText}</p>
+
+    <h2>Routing Table (${routeTable.cmd})</h2>
+    <pre>${(routeTable.stdout || '').replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s])) || '(vuoto)'}</pre>
+    ${routeTable.stderr ? `<h3>stderr</h3><pre>${routeTable.stderr.replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</pre>` : ''}
+
+    <h2>Interfacce (${ifcfg.cmd})</h2>
+    <pre>${(ifcfg.stdout || '').replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s])) || '(vuoto)'}</pre>
+    ${ifcfg.stderr ? `<h3>stderr</h3><pre>${ifcfg.stderr.replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</pre>` : ''}
+
+    <h2>Ping gateway${gw ? ` (${gw})` : ''} (${pingGw.cmd})</h2>
+    <pre>${(pingGw.stdout || '').replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s])) || '(vuoto)'}</pre>
+    ${pingGw.stderr ? `<h3>stderr</h3><pre>${pingGw.stderr.replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</pre>` : ''}
+
+    <h2>Traceroute (${trace.cmd})</h2>
+    <pre>${(trace.stdout || '').replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s])) || '(vuoto)'}</pre>
+    ${trace.stderr ? `<h3>stderr</h3><pre>${trace.stderr.replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</pre>` : ''}
+
+    <p style="margin-top:16px;color:#666;font-size:0.9em">
+      Nota: su App Service/ASE alcuni comandi possono non essere disponibili o l’ICMP può essere bloccato; 
+      in tal caso è normale vedere errori pur con connettività applicativa funzionante.
+    </p>
+  `);
+});
+
 
 // Funzione per testare la connessione TCP su host/porta
 function checkPort(host, port, timeoutMs = 3000) {
