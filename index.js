@@ -184,7 +184,8 @@ app.post('/test', async (req, res) => {
   let statusCode = null;
   let responseBody = '';
 
-  if (!remoteUrl || !isSafeUrl(remoteUrl)) {
+//  if (!remoteUrl || !isSafeUrl(remoteUrl)) {
+  if (!remoteUrl) {
     responseBody = 'RemoteUrl è vuoto o non consentito. Inserisci un URL http/https valido (no reti interne/loopback).';
     return res.render('index', {
       remoteUrl,
