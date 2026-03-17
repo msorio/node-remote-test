@@ -31,7 +31,7 @@ async function tryExec(file, args = [], options = {}) {
 
 // Escape HTML minimale per blocchi <pre>
 function esc(s = '') {
-  return s.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+  return String(s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
 }
 
 // Sanitizzazione basilare dell'host (IP o hostname semplice)
@@ -68,42 +68,221 @@ function sanitizeForwardHeaders(h = {}) {
   return out;
 }
 
-function buildHttpsAgentForTest() {
-  const caPath = process.env.TEST_CA_CERT_PATH; // es: /home/site/wwwroot/certs/ca.pem
-  const expectedFingerprint256 = process.env.TEST_CERT_FINGERPRINT256; // es: AA:BB:CC:...
+// ------------------------------
+// TLS / Certificati
+// ------------------------------
+
+function formatCert(cert) {
+  if (!cert || typeof cert !== 'object' || Object.keys(cert).length === 0) {
+    return 'Nessun certificato disponibile.';
+  }
+
+  const validFrom = cert.valid_from || '';
+  const validTo = cert.valid_to || '';
+
+  return JSON.stringify(
+    {
+      subject: cert.subject || null,
+      issuer: cert.issuer || null,
+      subjectaltname: cert.subjectaltname || null,
+      serialNumber: cert.serialNumber || null,
+      fingerprint: cert.fingerprint || null,
+      fingerprint256: cert.fingerprint256 || null,
+      valid_from: validFrom,
+      valid_to: validTo
+    },
+    null,
+    2
+  );
+}
+
+function buildHttpsAgentForTest(verboseLog = []) {
+  const caPath = process.env.TEST_CA_CERT_PATH;
+  const expectedFingerprint256 = process.env.TEST_CERT_FINGERPRINT256;
 
   const agentOptions = {
     rejectUnauthorized: true
   };
 
-  // Se vuoi fidarti di una CA specifica
+  verboseLog.push('TLS: configurazione agent HTTPS inizializzata.');
+  verboseLog.push('TLS: rejectUnauthorized=true.');
+
   if (caPath) {
-    agentOptions.ca = fs.readFileSync(caPath);
+    try {
+      agentOptions.ca = fs.readFileSync(caPath);
+      verboseLog.push(`TLS: caricata CA custom da TEST_CA_CERT_PATH=${caPath}`);
+    } catch (err) {
+      verboseLog.push(`TLS: errore caricamento CA custom da ${caPath}: ${err.message}`);
+      throw new Error(`Impossibile leggere TEST_CA_CERT_PATH (${caPath}): ${err.message}`);
+    }
+  } else {
+    verboseLog.push('TLS: nessuna CA custom configurata; verrà usato il trust store di sistema/Node.');
   }
 
-  // Se vuoi anche controllare il fingerprint del certificato server
   if (expectedFingerprint256) {
+    verboseLog.push(`TLS: fingerprint atteso configurato: ${expectedFingerprint256}`);
+
     agentOptions.checkServerIdentity = (host, cert) => {
+      verboseLog.push(`TLS: checkServerIdentity invocato per host=${host}`);
+      verboseLog.push(`TLS: certificato server ricevuto:\n${formatCert(cert)}`);
+
       const defaultErr = tls.checkServerIdentity(host, cert);
       if (defaultErr) {
+        verboseLog.push(`TLS: validazione hostname/SAN fallita: ${defaultErr.message}`);
         return defaultErr;
       }
 
       const actual = (cert.fingerprint256 || '').toUpperCase();
       const expected = expectedFingerprint256.toUpperCase();
 
+      verboseLog.push(`TLS: confronto fingerprint256. Atteso=${expected}`);
+      verboseLog.push(`TLS: confronto fingerprint256. Ricevuto=${actual || '(vuoto)'}`);
+
       if (actual !== expected) {
-        return new Error(
+        const err = new Error(
           `Fingerprint certificato non valido. Atteso=${expected}, ricevuto=${actual}`
         );
+        verboseLog.push(`TLS: fingerprint mismatch: ${err.message}`);
+        return err;
       }
 
+      verboseLog.push('TLS: fingerprint match OK.');
       return undefined;
     };
+  } else {
+    verboseLog.push('TLS: nessun fingerprint atteso configurato; verrà eseguita solo la validazione standard del certificato.');
   }
 
   return new https.Agent(agentOptions);
 }
+
+function collectTlsProbe(remoteUrl, verboseLog = []) {
+  return new Promise((resolve) => {
+    let url;
+    try {
+      url = new URL(remoteUrl);
+    } catch (err) {
+      verboseLog.push(`TLS probe: URL non valido: ${err.message}`);
+      return resolve({
+        ok: false,
+        error: `URL non valido: ${err.message}`
+      });
+    }
+
+    if (url.protocol !== 'https:') {
+      verboseLog.push('TLS probe: protocollo non HTTPS, probe non eseguita.');
+      return resolve({
+        ok: true,
+        skipped: true,
+        message: 'Probe TLS saltata: URL non HTTPS.'
+      });
+    }
+
+    const host = url.hostname;
+    const port = Number(url.port || 443);
+
+    verboseLog.push(`TLS probe: avvio connessione TLS a ${host}:${port}`);
+
+    const socket = tls.connect(
+      {
+        host,
+        port,
+        servername: host,
+        rejectUnauthorized: false
+      },
+      () => {
+        try {
+          const cert = socket.getPeerCertificate(true);
+          const protocol = socket.getProtocol();
+          const cipher = socket.getCipher();
+          const authorized = socket.authorized;
+          const authorizationError = socket.authorizationError || null;
+
+          verboseLog.push(`TLS probe: handshake completato. protocol=${protocol || 'n/d'}`);
+          verboseLog.push(`TLS probe: cipher=${cipher ? JSON.stringify(cipher) : 'n/d'}`);
+          verboseLog.push(`TLS probe: authorized=${authorized}`);
+          if (authorizationError) {
+            verboseLog.push(`TLS probe: authorizationError=${authorizationError}`);
+          }
+          verboseLog.push(`TLS probe: certificato peer:\n${formatCert(cert)}`);
+
+          socket.end();
+
+          resolve({
+            ok: true,
+            skipped: false,
+            protocol,
+            cipher,
+            authorized,
+            authorizationError,
+            certificate: {
+              subject: cert.subject || null,
+              issuer: cert.issuer || null,
+              subjectaltname: cert.subjectaltname || null,
+              serialNumber: cert.serialNumber || null,
+              fingerprint: cert.fingerprint || null,
+              fingerprint256: cert.fingerprint256 || null,
+              valid_from: cert.valid_from || null,
+              valid_to: cert.valid_to || null
+            }
+          });
+        } catch (err) {
+          socket.destroy();
+          verboseLog.push(`TLS probe: errore durante la raccolta dati certificato: ${err.message}`);
+          resolve({
+            ok: false,
+            error: err.message
+          });
+        }
+      }
+    );
+
+    socket.setTimeout(8000);
+
+    socket.once('error', (err) => {
+      verboseLog.push(`TLS probe: errore socket: ${err.message}`);
+      resolve({
+        ok: false,
+        error: err.message,
+        code: err.code || null
+      });
+    });
+
+    socket.once('timeout', () => {
+      socket.destroy();
+      verboseLog.push('TLS probe: timeout.');
+      resolve({
+        ok: false,
+        error: 'Timeout durante TLS probe'
+      });
+    });
+  });
+}
+
+function buildDetailedAxiosError(error) {
+  const details = {
+    message: error?.message || 'Errore sconosciuto',
+    code: error?.code || null,
+    name: error?.name || null,
+    errno: error?.errno || null,
+    syscall: error?.syscall || null,
+    hostname: error?.hostname || null,
+    host: error?.host || null,
+    port: error?.port || null
+  };
+
+  if (error?.response) {
+    details.responseStatus = error.response.status;
+    details.responseHeaders = error.response.headers || null;
+    details.responseData =
+      typeof error.response.data === 'object'
+        ? error.response.data
+        : String(error.response.data || '');
+  }
+
+  return details;
+}
+
 // ------------------------------
 // Diagnostica di rete (comandi)
 // ------------------------------
@@ -222,8 +401,8 @@ app.post('/test', async (req, res) => {
 
   let statusCode = null;
   let responseBody = '';
+  const verboseTlsLog = [];
 
-//  if (!remoteUrl || !isSafeUrl(remoteUrl)) {
   if (!remoteUrl) {
     responseBody = 'RemoteUrl è vuoto o non consentito. Inserisci un URL http/https valido (no reti interne/loopback).';
     return res.render('index', {
@@ -260,19 +439,65 @@ app.post('/test', async (req, res) => {
   console.log('Http Method:', httpMethod);
   console.log('Payload Type:', payloadType);
 
+  let parsedUrl = null;
+  try {
+    parsedUrl = new URL(remoteUrl);
+    verboseTlsLog.push(`URL parse OK: protocol=${parsedUrl.protocol}, host=${parsedUrl.hostname}, port=${parsedUrl.port || '(default)'}, path=${parsedUrl.pathname}`);
+  } catch (err) {
+    responseBody = `URL non valido: ${err.message}`;
+    return res.render('index', {
+      remoteUrl,
+      httpMethod,
+      headersJson,
+      payloadType,
+      payloadText,
+      statusCode,
+      responseBody
+    });
+  }
+
+  let tlsProbeResult = null;
+
   // Prepara la configurazione per Axios
   const axiosConfig = {
     url: remoteUrl,
     method: httpMethod,
     headers: { ...headers },
     timeout: 10000,
-    maxBodyLength: 1 * 1024 * 1024,
-    maxContentLength: 2 * 1024 * 1024,
-    validateStatus: () => true
+    maxBodyLength: 1 * 1024 * 1024, // 1MB
+    maxContentLength: 2 * 1024 * 1024, // 2MB
+    validateStatus: () => true // accettiamo anche 4xx/5xx senza throw
   };
 
-  if (remoteUrl.toLowerCase().startsWith('https://')) {
-    axiosConfig.httpsAgent = buildHttpsAgentForTest();
+  if (parsedUrl.protocol === 'https:') {
+    verboseTlsLog.push('Richiesta HTTPS rilevata: avvio diagnostica certificato.');
+
+    tlsProbeResult = await collectTlsProbe(remoteUrl, verboseTlsLog);
+
+    try {
+      axiosConfig.httpsAgent = buildHttpsAgentForTest(verboseTlsLog);
+      verboseTlsLog.push('HTTPS agent creato correttamente.');
+    } catch (err) {
+      responseBody =
+        'Errore nella configurazione TLS:\n\n' +
+        err.message +
+        '\n\n--- TLS VERBOSE LOG ---\n' +
+        verboseTlsLog.join('\n') +
+        '\n\n--- TLS PROBE ---\n' +
+        JSON.stringify(tlsProbeResult, null, 2);
+
+      return res.render('index', {
+        remoteUrl,
+        httpMethod,
+        headersJson,
+        payloadType,
+        payloadText,
+        statusCode,
+        responseBody
+      });
+    }
+  } else {
+    verboseTlsLog.push('Richiesta non HTTPS: nessuna verifica certificato applicata.');
   }
 
   if (['POST', 'PUT', 'PATCH'].includes(httpMethod)) {
@@ -299,32 +524,50 @@ app.post('/test', async (req, res) => {
   }
 
   try {
+    verboseTlsLog.push(`Avvio chiamata Axios verso ${remoteUrl}`);
     const response = await axios(axiosConfig);
     statusCode = response.status;
-    console.log('Status Code:', statusCode);
 
+    console.log('Status Code:', statusCode);
+    verboseTlsLog.push(`Chiamata Axios completata con status=${statusCode}`);
+
+    let bodyText = '';
     if (typeof response.data === 'object') {
-      responseBody = JSON.stringify(response.data, null, 2);
+      bodyText = JSON.stringify(response.data, null, 2);
     } else {
-      responseBody = response.data;
+      bodyText = String(response.data || '');
+    }
+
+    if (parsedUrl.protocol === 'https:') {
+      responseBody =
+        `=== ESITO CHIAMATA HTTPS ===\n` +
+        `Status Code: ${statusCode}\n\n` +
+        `=== TLS VERBOSE LOG ===\n${verboseTlsLog.join('\n')}\n\n` +
+        `=== TLS PROBE ===\n${JSON.stringify(tlsProbeResult, null, 2)}\n\n` +
+        `=== RESPONSE BODY ===\n${bodyText}`;
+    } else {
+      responseBody = bodyText;
     }
   } catch (error) {
+    const detailedError = buildDetailedAxiosError(error);
+
     if (error.response) {
       statusCode = error.response.status;
-      if (typeof error.response.data === 'object') {
-        responseBody = JSON.stringify(error.response.data, null, 2);
-        console.log('Error status:', statusCode);
-      } else {
-        responseBody = error.response.data || error.message;
-        console.log('Error status:', statusCode);
-      }
+      console.log('Error status:', statusCode);
+      verboseTlsLog.push(`Axios ha restituito una response di errore con status=${statusCode}`);
     } else {
-      responseBody = `Errore chiamata HTTPS/TLS: ${error.message}`;
-      if (error.code) {
-        responseBody += ` (code: ${error.code})`;
-      }
       console.log('Network/Config Error:', error.message, error.code || '');
+      verboseTlsLog.push(`Errore di rete/configurazione: ${error.message}`);
+      if (error.code) {
+        verboseTlsLog.push(`Codice errore: ${error.code}`);
+      }
     }
+
+    responseBody =
+      `=== ERRORE CHIAMATA ===\n` +
+      `${JSON.stringify(detailedError, null, 2)}\n\n` +
+      `=== TLS VERBOSE LOG ===\n${verboseTlsLog.join('\n')}\n\n` +
+      `=== TLS PROBE ===\n${JSON.stringify(tlsProbeResult, null, 2)}`;
   }
 
   // Ricarichiamo la pagina con i risultati
