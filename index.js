@@ -2,6 +2,9 @@ const express = require('express');
 const axios = require('axios');
 const oracledb = require('oracledb');
 const net = require('net');
+const https = require('https');
+const tls = require('tls');
+const fs = require('fs');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 
@@ -65,6 +68,42 @@ function sanitizeForwardHeaders(h = {}) {
   return out;
 }
 
+function buildHttpsAgentForTest() {
+  const caPath = process.env.TEST_CA_CERT_PATH; // es: /home/site/wwwroot/certs/ca.pem
+  const expectedFingerprint256 = process.env.TEST_CERT_FINGERPRINT256; // es: AA:BB:CC:...
+
+  const agentOptions = {
+    rejectUnauthorized: true
+  };
+
+  // Se vuoi fidarti di una CA specifica
+  if (caPath) {
+    agentOptions.ca = fs.readFileSync(caPath);
+  }
+
+  // Se vuoi anche controllare il fingerprint del certificato server
+  if (expectedFingerprint256) {
+    agentOptions.checkServerIdentity = (host, cert) => {
+      const defaultErr = tls.checkServerIdentity(host, cert);
+      if (defaultErr) {
+        return defaultErr;
+      }
+
+      const actual = (cert.fingerprint256 || '').toUpperCase();
+      const expected = expectedFingerprint256.toUpperCase();
+
+      if (actual !== expected) {
+        return new Error(
+          `Fingerprint certificato non valido. Atteso=${expected}, ricevuto=${actual}`
+        );
+      }
+
+      return undefined;
+    };
+  }
+
+  return new https.Agent(agentOptions);
+}
 // ------------------------------
 // Diagnostica di rete (comandi)
 // ------------------------------
@@ -227,10 +266,14 @@ app.post('/test', async (req, res) => {
     method: httpMethod,
     headers: { ...headers },
     timeout: 10000,
-    maxBodyLength: 1 * 1024 * 1024, // 1MB
-    maxContentLength: 2 * 1024 * 1024, // 2MB
-    validateStatus: () => true // accettiamo anche 4xx/5xx senza throw
+    maxBodyLength: 1 * 1024 * 1024,
+    maxContentLength: 2 * 1024 * 1024,
+    validateStatus: () => true
   };
+
+  if (remoteUrl.toLowerCase().startsWith('https://')) {
+    axiosConfig.httpsAgent = buildHttpsAgentForTest();
+  }
 
   if (['POST', 'PUT', 'PATCH'].includes(httpMethod)) {
     if (payloadType === 'json') {
@@ -276,8 +319,11 @@ app.post('/test', async (req, res) => {
         console.log('Error status:', statusCode);
       }
     } else {
-      responseBody = error.message;
-      console.log('Network/Config Error:', error.message);
+      responseBody = `Errore chiamata HTTPS/TLS: ${error.message}`;
+      if (error.code) {
+        responseBody += ` (code: ${error.code})`;
+      }
+      console.log('Network/Config Error:', error.message, error.code || '');
     }
   }
 
